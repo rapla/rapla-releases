@@ -103,9 +103,9 @@ jobs:
 
           Docker: \`docker pull ghcr.io/rapla/rapla:nightly\`
 
-          Verify: gh attestation verify rapla.jar --repo rapla/rapla-release --signer-workflow rapla/rapla-release/.github/workflows/nightly.yml --source-ref refs/heads/main
+          Verify: gh attestation verify rapla.jar --repo rapla/rapla-releases --signer-workflow rapla/rapla-releases/.github/workflows/nightly.yml --source-ref refs/heads/main
 
-          Verify image: gh attestation verify oci://ghcr.io/rapla/rapla:nightly --repo rapla/rapla-release --signer-workflow rapla/rapla-release/.github/workflows/nightly.yml --source-ref refs/heads/main
+          Verify image: gh attestation verify oci://ghcr.io/rapla/rapla:nightly --repo rapla/rapla-releases --signer-workflow rapla/rapla-releases/.github/workflows/nightly.yml --source-ref refs/heads/main
           EOF
           if ! gh release view nightly >/dev/null 2>&1; then
             gh release create nightly --prerelease --target main --title "Nightly build" --notes-file notes.md
