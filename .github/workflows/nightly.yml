@@ -15,17 +15,12 @@ env:
   IMAGE: ghcr.io/rapla/rapla
 
 jobs:
-  nightly:
+  build:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-      id-token: write
-      attestations: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
+    permissions: {}
+    outputs:
+      sha: ${{ steps.src.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -43,13 +38,43 @@ jobs:
       - name: Source commit
         id: src
         run: echo "sha=$(git -C rapla rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build image
+        working-directory: rapla
+        run: |
+          docker build -t "$IMAGE:nightly" .
+          docker save "$IMAGE:nightly" -o ../image.tar
+          cp rapla-app/target/rapla.jar ../rapla.jar
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nightly
+          path: |
+            rapla.jar
+            image.tar
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: nightly
+          path: dist
       - name: Attest rapla.jar
         uses: actions/attest@v4
         with:
-          subject-path: rapla/rapla-app/target/rapla.jar
+          subject-path: dist/rapla.jar
       - name: Update nightly release
         env:
-          SHA: ${{ steps.src.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.build.outputs.sha }}
         run: |
           cat > notes.md <<EOF
           Nightly test build of rapla/rapla master at [${SHA::9}](https://github.com/rapla/rapla/commit/$SHA), built $(date -u '+%Y-%m-%d %H:%M UTC') ([run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})).
@@ -62,13 +87,14 @@ jobs:
             gh release create nightly --prerelease --target main --title "Nightly build" --notes-file notes.md
           fi
           gh release edit nightly --prerelease --notes-file notes.md
-          gh release upload nightly rapla/rapla-app/target/rapla.jar --clobber
-      - name: Build and push image
+          gh release upload nightly dist/rapla.jar --clobber
+      - name: Push image
         id: image
-        working-directory: rapla
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          docker load -i dist/image.tar
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker build -t "$IMAGE:nightly" .
           docker push "$IMAGE:nightly"
           digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:nightly")
           echo "digest=${digest#*@}" >> "$GITHUB_OUTPUT"
@@ -79,6 +105,8 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
       - name: Delete untagged image versions older than 10 days
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           cutoff=$(date -u -d '10 days ago' +%Y-%m-%dT%H:%M:%SZ)
           versions="orgs/rapla/packages/container/rapla/versions"
