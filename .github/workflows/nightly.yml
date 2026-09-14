@@ -35,13 +35,33 @@ jobs:
       - name: Build rapla.jar
         working-directory: rapla
         run: mvn -B clean package -DskipTests -Psign-jks
-      - name: Source commit
+      - name: Build metadata
         id: src
-        run: echo "sha=$(git -C rapla rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        run: |
+          sha=$(git -C rapla rev-parse HEAD)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "unexpected commit sha: $sha"; exit 1; }
+          manifest=$(unzip -p rapla/rapla-app/target/rapla.jar META-INF/MANIFEST.MF | tr -d '\r')
+          version=$(sed -n 's/^Implementation-Version: //p' <<<"$manifest")
+          buildtime=$(sed -n 's/^Build-Time: \(.*\) GMT+0$/\1/p' <<<"$manifest")
+          [[ -n "$version" && -n "$buildtime" ]] || { echo "manifest lacks Implementation-Version or Build-Time"; exit 1; }
+          created=$(date -u -d "$buildtime" +%Y-%m-%dT%H:%M:%SZ)
+          {
+            echo "sha=$sha"
+            echo "version=$version"
+            echo "created=$created"
+          } >> "$GITHUB_OUTPUT"
       - name: Build image
         working-directory: rapla
+        env:
+          REVISION: ${{ steps.src.outputs.sha }}
+          VERSION: ${{ steps.src.outputs.version }}
+          CREATED: ${{ steps.src.outputs.created }}
         run: |
-          docker build -t "$IMAGE:nightly" .
+          docker build -t "$IMAGE:nightly" \
+            --label "org.opencontainers.image.revision=$REVISION" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --label "org.opencontainers.image.created=$CREATED" \
+            .
           docker save "$IMAGE:nightly" -o ../image.tar
           cp rapla-app/target/rapla.jar ../rapla.jar
       - uses: actions/upload-artifact@v7
@@ -81,7 +101,11 @@ jobs:
 
           Self-signed with the public dev certificate (raplaselfsigned.ks) - not for production.
 
+          Docker: \`docker pull ghcr.io/rapla/rapla:nightly\`
+
           Verify: gh attestation verify rapla.jar --repo rapla/rapla-nightly --signer-workflow rapla/rapla-nightly/.github/workflows/nightly.yml --source-ref refs/heads/main
+
+          Verify image: gh attestation verify oci://ghcr.io/rapla/rapla:nightly --repo rapla/rapla-nightly --signer-workflow rapla/rapla-nightly/.github/workflows/nightly.yml --source-ref refs/heads/main
           EOF
           if ! gh release view nightly >/dev/null 2>&1; then
             gh release create nightly --prerelease --target main --title "Nightly build" --notes-file notes.md
