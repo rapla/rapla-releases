@@ -140,3 +140,26 @@ jobs:
               gh api -X DELETE "$versions/$id"
               echo "deleted version $id"
             done
+
+  keepalive:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Commit last-build.txt at most every 20 days
+        env:
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          age=$(( $(date +%s) - $(git log -1 --format=%ct) ))
+          if (( age < 20 * 24 * 3600 )); then
+            echo "last commit $(( age / 86400 )) days ago, nothing to do"
+            exit 0
+          fi
+          printf '%s rapla/rapla@%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$SHA" > last-build.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last-build.txt
+          git commit -qm "last build $(date -u '+%Y-%m-%d')"
+          git push -q
