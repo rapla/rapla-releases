@@ -1,0 +1,90 @@
+name: Nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '47 2 * * *'
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/rapla/rapla
+
+jobs:
+  nightly:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: rapla/rapla
+          ref: master
+          path: rapla
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Build rapla.jar
+        working-directory: rapla
+        run: mvn -B clean package -DskipTests -Psign-jks
+      - name: Source commit
+        id: src
+        run: echo "sha=$(git -C rapla rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Attest rapla.jar
+        uses: actions/attest@v4
+        with:
+          subject-path: rapla/rapla-app/target/rapla.jar
+      - name: Update nightly release
+        env:
+          SHA: ${{ steps.src.outputs.sha }}
+        run: |
+          cat > notes.md <<EOF
+          Nightly test build of rapla/rapla master at [${SHA::9}](https://github.com/rapla/rapla/commit/$SHA), built $(date -u '+%Y-%m-%d %H:%M UTC') ([run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})).
+
+          Self-signed with the public dev certificate (raplaselfsigned.ks) - not for production.
+
+          Verify: gh attestation verify rapla.jar --repo rapla/rapla-nightly --signer-workflow rapla/rapla-nightly/.github/workflows/nightly.yml --source-ref refs/heads/main
+          EOF
+          if ! gh release view nightly >/dev/null 2>&1; then
+            gh release create nightly --prerelease --target main --title "Nightly build" --notes-file notes.md
+          fi
+          gh release edit nightly --prerelease --notes-file notes.md
+          gh release upload nightly rapla/rapla-app/target/rapla.jar --clobber
+      - name: Build and push image
+        id: image
+        working-directory: rapla
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -t "$IMAGE:nightly" .
+          docker push "$IMAGE:nightly"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:nightly")
+          echo "digest=${digest#*@}" >> "$GITHUB_OUTPUT"
+      - name: Attest image
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+      - name: Delete untagged image versions older than 10 days
+        run: |
+          cutoff=$(date -u -d '10 days ago' +%Y-%m-%dT%H:%M:%SZ)
+          versions="orgs/rapla/packages/container/rapla/versions"
+          gh api --paginate "$versions" \
+            --jq ".[] | select((.metadata.container.tags | length) == 0 and .created_at < \"$cutoff\") | .id" |
+            while read -r id; do
+              gh api -X DELETE "$versions/$id"
+              echo "deleted version $id"
+            done
